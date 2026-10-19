@@ -55,7 +55,7 @@ app.add_middleware(
 
 # ── Database lifecycle ────────────────────────────────────────
 
-db_client: AsyncIOMotorClient = None
+db_client: AsyncIOMotorClient = None  # Will be initialized on startup and closed on shutdown
 
 @app.on_event("startup")
 async def startup_db_client():
