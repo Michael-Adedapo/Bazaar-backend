@@ -47,7 +47,10 @@ app = FastAPI(title="Bazaar Pre-order API")
 # Single CORS registration — allow all origins for now, tighten to your domain in production
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://bazaar-frontend-one.vercel.app",
+        "http://localhost:5173"  # For local development
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
