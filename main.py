@@ -1,5 +1,8 @@
 import os
 from dotenv import load_dotenv
+
+load_dotenv()
+
 from jose import JWTError, jwt
 from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, HTTPException, Depends
@@ -11,14 +14,15 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from bson import ObjectId
 
 # ── Config ────────────────────────────────────────────────────
-LOCAL_MONGO_URI = "mongodb://localhost:27017"
+LOCAL_MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 DB_NAME         = "bazaar_db"
 SECRET_KEY      = os.getenv("JWT_SECRET", "change-this-in-production")
 ALGORITHM       = "HS256"
 TOKEN_TTL       = 60 * 8   # 8 hours
+ADMIN_USERNAME  = os.getenv("ADMIN_USERNAME", "admin")
+ADMIN_PASSWORD  = os.getenv("ADMIN_PASSWORD", "changeme")
 
 # ── JWT helpers ───────────────────────────────────────────────
-load_dotenv()  # Load .env file if present, so we can read ADMIN_USERNAME and ADMIN_PASSWORD
 security = HTTPBearer()
 
 def create_token(username: str) -> str:
@@ -44,12 +48,11 @@ def require_admin(creds: HTTPAuthorizationCredentials = Depends(security)):
 
 app = FastAPI(title="Bazaar Pre-order API")
 
-# Single CORS registration — allow all origins for now, tighten to your domain in production
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://bazaar-frontend-one.vercel.app",
-        "http://localhost:5173"  # For local development
+        "http://localhost:5173"
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -58,7 +61,7 @@ app.add_middleware(
 
 # ── Database lifecycle ────────────────────────────────────────
 
-db_client: AsyncIOMotorClient = None  # Will be initialized on startup and closed on shutdown
+db_client: AsyncIOMotorClient = None
 
 @app.on_event("startup")
 async def startup_db_client():
@@ -91,6 +94,10 @@ class OrderRequest(BaseModel):
     customer_phone: str
     items: List[OrderItem]
 
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
 # ── Customer endpoints ────────────────────────────────────────
 
 @app.post("/api/orders")
@@ -114,6 +121,7 @@ async def process_order(order: OrderRequest):
         "customer_name": order.customer_name,
         "customer_phone": order.customer_phone,
         "items": [item.dict() for item in order.items],
+        "total": final_total,
         "pricing": {
             "subtotal": subtotal,
             "discount_applied": discount > 0,
@@ -143,25 +151,18 @@ async def process_order(order: OrderRequest):
 # ── Admin endpoints ───────────────────────────────────────────
 
 @app.post("/api/admin/login")
-async def admin_login(body: dict):
+async def admin_login(creds: LoginRequest):
     """
-    Verifies admin credentials against ADMIN_USERNAME and ADMIN_PASSWORD env vars.
-    Returns a signed JWT on success. The frontend stores this in sessionStorage
-    and attaches it as a Bearer token to every subsequent admin request.
+    Handles admin login requests.
+    Protected — requires a valid admin JWT in the Authorization header.
     """
     print(f"[Debug] Got: '{creds.username}' / '{creds.password}'")
     print(f"[Debug] Env: '{ADMIN_USERNAME}' / '{ADMIN_PASSWORD}'")
-    username = body.get("username")
-    password = body.get("password")
-    ok = (
-        username == os.getenv("ADMIN_USERNAME", "admin")
-        and password == os.getenv("ADMIN_PASSWORD", "changeme")
-    )
-    if not ok:
-        print(f"[Auth] Failed login attempt for username '{username}'")
+    if creds.username != ADMIN_USERNAME or creds.password != ADMIN_PASSWORD:
+        print(f"[Auth] Failed login attempt for username '{creds.username}'")
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    print(f"[Auth] Admin '{username}' logged in successfully")
-    return {"access_token": create_token(username), "token_type": "bearer"}
+    print(f"[Auth] Admin '{creds.username}' logged in successfully")
+    return {"access_token": create_token(creds.username), "token_type": "bearer"}
 
 
 @app.get("/api/orders")
