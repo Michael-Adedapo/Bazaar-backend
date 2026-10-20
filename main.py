@@ -149,6 +149,8 @@ async def admin_login(body: dict):
     Returns a signed JWT on success. The frontend stores this in sessionStorage
     and attaches it as a Bearer token to every subsequent admin request.
     """
+    print(f"[Debug] Got: '{creds.username}' / '{creds.password}'")
+    print(f"[Debug] Env: '{ADMIN_USERNAME}' / '{ADMIN_PASSWORD}'")
     username = body.get("username")
     password = body.get("password")
     ok = (
