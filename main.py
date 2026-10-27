@@ -205,3 +205,16 @@ async def update_order_status(order_id: str, body: dict, _=Depends(require_admin
 
     print(f"[Orders] Order {order_id} status updated to '{status}'")
     return {"ok": True}
+
+
+@app.delete("/api/orders/clear")
+async def clear_orders(_=Depends(require_admin)):
+    """
+    Deletes all orders from the database.
+    Protected — requires a valid admin JWT.
+    Used to wipe beta test data before going live.
+    """
+    db = get_db()
+    result = await db.orders.delete_many({})
+    print(f"[Orders] Cleared {result.deleted_count} orders from the database")
+    return {"ok": True, "deleted_count": result.deleted_count}
