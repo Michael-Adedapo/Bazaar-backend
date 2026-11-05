@@ -104,18 +104,18 @@ class LoginRequest(BaseModel):
 async def process_order(order: OrderRequest):
     """
     Receives a new order from the customer-facing app.
-    Verifies prices on the backend, applies a 5% discount for orders ≥ ₦30,000,
-    saves the order to MongoDB as 'pending', and returns the order ID + receipt summary.
+    Submitted item prices already include applicable item discounts. Sums those
+    prices without applying an additional order-level discount, saves the order
+    to MongoDB as 'pending', and returns the order ID + receipt summary.
     """
     if not order.items:
         raise HTTPException(status_code=400, detail="Cart is empty")
 
     subtotal = sum(item.price * item.quantity for item in order.items)
-    discount = subtotal * 0.05 if subtotal >= 30000 else 0
-    final_total = subtotal - discount
+    final_total = subtotal
 
     print(f"[Order] New order from '{order.customer_name}' ({order.customer_phone}) — "
-          f"subtotal: ₦{subtotal:,.0f}, discount: ₦{discount:,.0f}, total: ₦{final_total:,.0f}")
+          f"item total: ₦{subtotal:,.0f}, amount due: ₦{final_total:,.0f}")
 
     order_document = {
         "customer_name": order.customer_name,
@@ -124,8 +124,8 @@ async def process_order(order: OrderRequest):
         "total": final_total,
         "pricing": {
             "subtotal": subtotal,
-            "discount_applied": discount > 0,
-            "discount_amount": discount,
+            "discount_applied": False,
+            "discount_amount": 0,
             "amount_due": final_total,
         },
         "status": "pending",
@@ -142,8 +142,8 @@ async def process_order(order: OrderRequest):
         "receipt": {
             "customer": order.customer_name,
             "subtotal": subtotal,
-            "discount_applied": discount > 0,
-            "discount_amount": discount,
+            "discount_applied": False,
+            "discount_amount": 0,
             "amount_due": final_total,
         },
     }
