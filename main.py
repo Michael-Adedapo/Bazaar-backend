@@ -8,10 +8,11 @@ from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List
 from motor.motor_asyncio import AsyncIOMotorClient
 from bson import ObjectId
+from pymongo.errors import DuplicateKeyError, PyMongoError
 
 # ── Config ────────────────────────────────────────────────────
 LOCAL_MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
@@ -21,6 +22,8 @@ ALGORITHM       = "HS256"
 TOKEN_TTL       = 60 * 8   # 8 hours
 ADMIN_USERNAME  = os.getenv("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD  = os.getenv("ADMIN_PASSWORD", "changeme")
+CROAKER_STOCK_LIMIT = 15
+CROAKER_INVENTORY_ID = "croaker-fish"
 
 # ── JWT helpers ───────────────────────────────────────────────
 security = HTTPBearer()
@@ -69,6 +72,7 @@ async def startup_db_client():
     global db_client
     db_client = AsyncIOMotorClient(LOCAL_MONGO_URI)
     print(f"[DB] Connected to MongoDB at {LOCAL_MONGO_URI}, using database '{DB_NAME}'")
+    await ensure_croaker_inventory(get_db())
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
@@ -81,13 +85,62 @@ def get_db():
     """Returns the active database handle. Call this inside every endpoint instead of using db directly."""
     return db_client[DB_NAME]
 
+def croaker_quantity(items):
+    quantity = 0
+    for item in items:
+        item_id = item.get("id", "") if isinstance(item, dict) else item.id
+        name = item.get("name", "") if isinstance(item, dict) else item.name
+        if item_id.strip().lower().replace(" ", "-") == "croaker-fish" or name.strip().lower() == "croaker fish":
+            quantity += int(item.get("quantity", 0) if isinstance(item, dict) else item.quantity)
+    return quantity
+
+async def ensure_croaker_inventory(db):
+    inventory = await db.inventory.find_one({"_id": CROAKER_INVENTORY_ID})
+    if inventory:
+        return inventory
+
+    committed = 0
+    async for order in db.orders.find(
+        {"status": {"$ne": "cancelled"}},
+        {"items": 1},
+    ):
+        committed += croaker_quantity(order.get("items", []))
+
+    try:
+        await db.inventory.update_one(
+            {"_id": CROAKER_INVENTORY_ID},
+            {"$setOnInsert": {"remaining": max(0, CROAKER_STOCK_LIMIT - committed)}},
+            upsert=True,
+        )
+    except DuplicateKeyError:
+        pass
+
+    return await db.inventory.find_one({"_id": CROAKER_INVENTORY_ID})
+
+async def reserve_croaker_stock(db, quantity):
+    if quantity <= 0:
+        return
+
+    await ensure_croaker_inventory(db)
+    result = await db.inventory.update_one(
+        {"_id": CROAKER_INVENTORY_ID, "remaining": {"$gte": quantity}},
+        {"$inc": {"remaining": -quantity}},
+    )
+    if result.modified_count == 0:
+        inventory = await db.inventory.find_one({"_id": CROAKER_INVENTORY_ID})
+        remaining = inventory["remaining"] if inventory else 0
+        raise HTTPException(
+            status_code=409,
+            detail=f"Only {remaining} Croaker Fish remaining.",
+        )
+
 # ── Pydantic schemas ──────────────────────────────────────────
 
 class OrderItem(BaseModel):
     id: str
     name: str
     price: float
-    quantity: int
+    quantity: int = Field(gt=0)
 
 class OrderRequest(BaseModel):
     customer_name: str
@@ -133,7 +186,19 @@ async def process_order(order: OrderRequest):
     }
 
     db = get_db()
-    result = await db.orders.insert_one(order_document)
+    croaker_count = croaker_quantity(order.items)
+    if croaker_count:
+        await reserve_croaker_stock(db, croaker_count)
+
+    try:
+        result = await db.orders.insert_one(order_document)
+    except PyMongoError:
+        if croaker_count:
+            await db.inventory.update_one(
+                {"_id": CROAKER_INVENTORY_ID},
+                {"$inc": {"remaining": croaker_count}},
+            )
+        raise
     print(f"[Order] Saved to MongoDB with id {result.inserted_id}")
 
     return {
@@ -149,6 +214,11 @@ async def process_order(order: OrderRequest):
     }
 
 # ── Admin endpoints ───────────────────────────────────────────
+
+@app.get("/api/inventory/croaker-fish")
+async def get_croaker_inventory():
+    inventory = await ensure_croaker_inventory(get_db())
+    return {"limit": CROAKER_STOCK_LIMIT, "remaining": inventory["remaining"]}
 
 @app.post("/api/admin/login")
 async def admin_login(creds: LoginRequest):
@@ -198,10 +268,41 @@ async def update_order_status(order_id: str, body: dict, _=Depends(require_admin
         raise HTTPException(status_code=400, detail=f"'{order_id}' is not a valid MongoDB ObjectId")
 
     db = get_db()
-    result = await db.orders.update_one({"_id": oid}, {"$set": {"status": status}})
-
-    if result.matched_count == 0:
+    order = await db.orders.find_one({"_id": oid})
+    if not order:
         raise HTTPException(status_code=404, detail=f"No order found with id '{order_id}'")
+
+    previous_status = order.get("status", "pending")
+    if previous_status == status:
+        return {"ok": True}
+
+    quantity = croaker_quantity(order.get("items", []))
+    reactivating = previous_status == "cancelled" and status != "cancelled"
+    if reactivating:
+        await reserve_croaker_stock(db, quantity)
+
+    status_filter = (
+        {"status": {"$exists": False}}
+        if "status" not in order
+        else {"status": previous_status}
+    )
+    result = await db.orders.update_one(
+        {"_id": oid, **status_filter},
+        {"$set": {"status": status}},
+    )
+    if result.matched_count == 0:
+        if reactivating and quantity:
+            await db.inventory.update_one(
+                {"_id": CROAKER_INVENTORY_ID},
+                {"$inc": {"remaining": quantity}},
+            )
+        raise HTTPException(status_code=409, detail="Order status changed. Refresh and try again.")
+
+    if previous_status != "cancelled" and status == "cancelled" and quantity:
+        await db.inventory.update_one(
+            {"_id": CROAKER_INVENTORY_ID},
+            {"$inc": {"remaining": quantity}},
+        )
 
     print(f"[Orders] Order {order_id} status updated to '{status}'")
     return {"ok": True}
